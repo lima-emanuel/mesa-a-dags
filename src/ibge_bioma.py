@@ -1,5 +1,6 @@
 import os
 import zipfile
+from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
@@ -8,7 +9,6 @@ import requests
 import yaml
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
-from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
 
 SUBPASTA_ASSUNTO = os.path.dirname(os.path.abspath(__file__))
@@ -27,13 +27,11 @@ LESSONIA_NAME = config["databases"]["lessonia"]["name"]
 
 LESSONIA_DATA_LOCAL = config["dir"]["lessonia"]["local_data"]
 
-URL_RAIZ = "https://rigeo.sgb.gov.br/items/ce81cffc-4395-4051-b441-c42ba03ef077"
+URL_RAIZ = "https://www.ibge.gov.br/geociencias/cartas-e-mapas/informacoes-ambientais/15842-biomas.html"
 
-URL_ZIP = (
-    "https://rigeo.sgb.gov.br/bitstreams/116876e8-a7d1-4a61-9e1b-63293ddc0ef1/download"
-)
+FILE_NAME = "dmRgNtTrBmBr_v2025_vetor_e250K.zip"
 
-FILE_NAME = "dominios_unidades_geo.zip"
+URL_ZIP = f"https://geoftp.ibge.gov.br/informacoes_ambientais/estudos_ambientais/biomas/dominios_regioes_naturais_do_brasil/2025/dados_geoespaciais/{FILE_NAME}"
 
 lessonia_path = f"{LESSONIA_DATA_LOCAL}/{FILE_NAME}"
 
@@ -45,20 +43,56 @@ HEADERS = {
 }
 
 
-def get_last_modified(url_raiz):
-    res = requests.get(url_raiz, headers=HEADERS, timeout=60)
-    res.raise_for_status()
+def get_last_modified():
+    dbf_files = download_and_extract_helper(lessonia_path)
 
-    soup = BeautifulSoup(res.text, "html.parser")
+    dbf_path = Path(dbf_files[0])
+    with dbf_path.open("rb") as f:
+        header = f.read(4)  # byte 0 = version, bytes 1-3 = YY MM DD
+    if len(header) < 4:
+        raise ValueError("DBF header too short")
 
-    year = int(soup.find(string="Data").parent.find_next().get_text(strip=True))
+    # bytes 1-3 are already single-byte integers; no need for hex, but we can use them directly
+    year_byte = header[1]
+    month_byte = header[2]
+    day_byte = header[3]
 
-    return pendulum.datetime(year)
+    year = 1900 + year_byte  # per DBF specification[web:25][web:28]
+    month = month_byte
+    day = day_byte
+
+    return pendulum.datetime(year, month, day)
+
+
+def download_and_extract_helper(path):
+    response = requests.get(URL_ZIP, headers=HEADERS, stream=True, timeout=60)
+    response.raise_for_status()
+    with open(path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+    pasta_extracao = os.path.join(os.path.dirname(path), "extracao_ibge_bioma")
+    os.makedirs(pasta_extracao, exist_ok=True)
+
+    with zipfile.ZipFile(path, "r") as zip_ref:
+        zip_ref.extractall(pasta_extracao)
+
+    dbf_files = [
+        os.path.join(root, name)
+        for root, dirs, files in os.walk(pasta_extracao)
+        for name in files
+        if name.endswith(".dbf")
+    ]
+
+    if not dbf_files:
+        raise FileNotFoundError("No .shp file found on the extracted ZIP.")
+
+    return dbf_files
 
 
 @task.branch(task_id="check_dates")
 def check_dates():
-    last_modified = get_last_modified(URL_RAIZ)
+    last_modified = get_last_modified()
 
     if not last_modified:
         print("Not possible to extract last modification date.")
@@ -69,7 +103,7 @@ def check_dates():
 
     engine = create_engine(DATABASE_URL)
 
-    sql = "select distinct (last_modified) from public.cprm_geodiv"
+    sql = "select distinct (last_modified) from public.ibge_bioma"
 
     try:
         df_data = pd.read_sql(sql, con=engine)
@@ -81,7 +115,7 @@ def check_dates():
             print("==================")
 
             if last_modified.replace(tzinfo=None) <= last_date:
-                print("No new data on MMAs website.")
+                print("No new data on IBGEs website.")
                 return "end"
         else:
             print("Table is empty. Downloading.")
@@ -93,7 +127,7 @@ def check_dates():
 
 @task(task_id="download_data")
 def download_data(destino_local):
-    print("Initiating download of floresta pública files")
+    print("Initiating download of IBGE Bioma files")
 
     os.makedirs(os.path.dirname(destino_local), exist_ok=True)
 
@@ -110,26 +144,26 @@ def download_data(destino_local):
 @task(task_id="truncate_table")
 def truncate_table(caminho_arquivo):
     engine = create_engine(DATABASE_URL)
-    print("Initiating TRUNCATE on table public.cprm_geodiv...")
+    print("Initiating TRUNCATE on table public.ibge_bioma...")
     try:
         with engine.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE public.cprm_geodiv;"))
-        print("Table public.cprm_geodiv truncated succesfully!")
+            conn.execute(text("TRUNCATE TABLE public.ibge_bioma;"))
+        print("Table public.ibge_bioma truncated succesfully!")
     except Exception as e:
-        print(f"Error when truncating cprm_geodiv: {e}")
+        print(f"Error when truncating ibge_bioma: {e}")
 
     return caminho_arquivo
 
 
 @task(task_id="upload_data")
 def upload_data(caminho):
-    pasta_extracao = os.path.join(os.path.dirname(caminho), "extracao_cprm_geodiv")
+    pasta_extracao = os.path.join(os.path.dirname(caminho), "extracao_ibge_bioma")
     os.makedirs(pasta_extracao, exist_ok=True)
 
     with zipfile.ZipFile(caminho, "r") as zip_ref:
         zip_ref.extractall(pasta_extracao)
 
-    last_modified = get_last_modified(URL_RAIZ)
+    last_modified = get_last_modified()
 
     arquivos_shp = [
         os.path.join(root, name)
@@ -146,19 +180,19 @@ def upload_data(caminho):
 
     engine = create_engine(DATABASE_URL)
 
-    df.to_postgis(name="cprm_geodiv", con=engine, if_exists="replace", index=False)
+    df.to_postgis(name="ibge_bioma", con=engine, if_exists="replace", index=False)
     print("Data inserted with success!")
 
 
 @dag(
-    dag_id="CPRM_GEODIV",
-    schedule="0 11 * * *",  # Roda às 11:00 UTC (uma hora após a de municípios)
+    dag_id="ibge_bioma",
+    schedule="0 11 * * 1",  # Roda às 11:00 UTC (uma hora após a de municípios)
     catchup=False,
     start_date=pendulum.datetime(2026, 6, 17),
     tags=["daily", "transformation"],
     max_active_runs=1,
 )
-def cprm_geodiv_update_task_flow():
+def ibge_bioma_update_task_flow():
     branches = check_dates()
 
     end = EmptyOperator(task_id="end", trigger_rule="none_failed_min_one_success")
@@ -171,4 +205,4 @@ def cprm_geodiv_update_task_flow():
     dw >> tr >> up >> end
 
 
-cprm_geodiv_update_task_flow()
+ibge_bioma_update_task_flow()
