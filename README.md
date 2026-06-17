@@ -1,2 +1,3 @@
-# mesa-a-dags
+# MESA-A DAGs
+
 Airflow DAGs for MESA-A
