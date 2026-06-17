@@ -26,7 +26,6 @@ LESSONIA_NAME = config["databases"]["lessonia"]["name"]
 
 LESSONIA_DATA_LOCAL = config["dir"]["lessonia"]["local_data"]
 
-# URL Raiz para Malhas de Setores Censitários (Brasil)
 URL_RAIZ = "http://mapas.mma.gov.br/i3geo/datadownload.htm?florestaspublicas"
 URL_SHP = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.shp"
 URL_SHX = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.shx"
@@ -94,7 +93,7 @@ def check_dates():
         return "end"
 
     print("=== DEBUG LOGS UF ===")
-    print(f"VALUE FROM WEBSITE (IBGE): {last_modified} | Type: {type(last_modified)}")
+    print(f"VALUE FROM WEBSITE (MMA): {last_modified} | Type: {type(last_modified)}")
 
     engine = create_engine(DATABASE_URL)
 
