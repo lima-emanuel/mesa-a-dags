@@ -1,6 +1,5 @@
 import os
-import re
-import zipfile
+from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
@@ -9,7 +8,6 @@ import requests
 import yaml
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
-from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
 
 SUBPASTA_ASSUNTO = os.path.dirname(os.path.abspath(__file__))
@@ -28,21 +26,13 @@ LESSONIA_NAME = config["databases"]["lessonia"]["name"]
 
 LESSONIA_DATA_LOCAL = config["dir"]["lessonia"]["local_data"]
 
-now = pendulum.now()
-
-LAST_CENSUS = 2022
-NEXT_CENSUS = 2030
-
 # URL Raiz para Malhas de Setores Censitários (Brasil)
-URL_RAIZ_IBGE = "https://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/malhas_de_setores_censitarios__divisoes_intramunicipais/censo_2022/setores/shp/BR/"
+URL_RAIZ = "http://mapas.mma.gov.br/i3geo/datadownload.htm?florestaspublicas"
+URL_SHP = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.shp"
+URL_SHX = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.shx"
+URL_DBF = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.dbf"
 
-if now.year > NEXT_CENSUS:
-    zip_name = "BR_setores_CD{NEXT_CENSUS}.zip"
-else:
-    zip_name = "BR_setores_CD{LAST_CENSUS}.zip"
-
-lessonia_path = f"{LESSONIA_DATA_LOCAL}/{zip_name}"
-url_file_path = f"{URL_RAIZ_IBGE}/{zip_name}"
+lessonia_path = f"{LESSONIA_DATA_LOCAL}/florestaspublicas/"
 
 DATABASE_URL = f"postgresql://{LESSONIA_USER}:{LESSONIA_PASS}@{LESSONIA_HOST}:{LESSONIA_PORT}/{LESSONIA_NAME}"
 
@@ -52,52 +42,52 @@ HEADERS = {
 }
 
 
-def get_last_modified(url_raiz):
+def get_last_modified(dbf_path):
     """
-    Searches the IBGE webpage for the modification date of BR_setores_CD2022.zip
-    and returns it.
+    Return the DBF 'last update' date as a pendulum datetime (YYYY-MM-DD, time set to 00:00).
+    Raises if the bytes are not a valid date.
     """
-    try:
-        if not url_raiz.endswith("/"):
-            url_raiz += "/"
+    dbf_path = Path(dbf_path)
+    with dbf_path.open("rb") as f:
+        header = f.read(4)  # byte 0 = version, bytes 1-3 = YY MM DD
+    if len(header) < 4:
+        raise ValueError("DBF header too short")
 
-        res_raiz = requests.get(url_raiz, headers=HEADERS, timeout=60)
-        if res_raiz.status_code != 200:
-            return None, None
+    # bytes 1-3 are already single-byte integers; no need for hex, but we can use them directly
+    year_byte = header[1]
+    month_byte = header[2]
+    day_byte = header[3]
 
-        soup_raiz = BeautifulSoup(res_raiz.text, "html.parser")
-        table = soup_raiz.find("table")
+    year = 1900 + year_byte  # per DBF specification[web:25][web:28]
+    month = month_byte
+    day = day_byte
 
-        last_modified = None
+    return pendulum.datetime(year, month, day)
 
-        pattern = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
 
-        for row in table.find_all("tr"):
-            for cell in row.find_all("td"):
-                text = cell.get_text(" ", strip=True)
-                m = re.search(pattern, text)
-                if m:
-                    last_modified = pendulum.parse(m.group())
+def get_last_modified_from_stream(dbf_url):
+    response = requests.get(URL_RAIZ, headers=HEADERS, timeout=60)
+    response.raise_for_status()
 
-        if last_modified:
-            print(
-                f"[IBGE SETORES CENSITÁRIOS] Last modified date in website: {last_modified}"
-            )
-            return last_modified
+    res = requests.get(URL_DBF, stream=True)
+    res.raise_for_status()
+    res.raw.decode_content = True  # handle gzip/deflate if needed
+    header = res.raw.read(4)
 
-        print(
-            "[IBGE SETORES CENSITÁRIOS] Not possible to extract last modification date."
-        )
-        return None, None
+    year_byte = header[1]
+    month_byte = header[2]
+    day_byte = header[3]
 
-    except Exception as e:
-        print(f"Failure to scrap the IBGE website: {e}")
-        return None, None
+    year = 1900 + year_byte  # per DBF specification[web:25][web:28]
+    month = month_byte
+    day = day_byte
+
+    return pendulum.datetime(year, month, day)
 
 
 @task.branch(task_id="check_dates")
 def check_dates():
-    last_modified = get_last_modified(URL_RAIZ_IBGE)
+    last_modified = get_last_modified_from_stream(URL_DBF)
 
     if not last_modified:
         print("Not possible to extract last modification date.")
@@ -108,7 +98,7 @@ def check_dates():
 
     engine = create_engine(DATABASE_URL)
 
-    sql = "select distinct (last_modified) from public.ibge_censitarios"
+    sql = "select distinct (last_modified) from public.mma_florestaspublicas"
 
     try:
         df_data = pd.read_sql(sql, con=engine)
@@ -120,7 +110,7 @@ def check_dates():
             print("==================")
 
             if last_modified.replace(tzinfo=None) <= last_date:
-                print("No new data on IBGEs website.")
+                print("No new data on MMAs website.")
                 return "end"
         else:
             print("Table is empty. Downloading.")
@@ -132,17 +122,30 @@ def check_dates():
 
 @task(task_id="download_data")
 def download_data(destino_local):
-    print(f"Initiating download of file: {url_file_path}")
-    response = requests.get(url_file_path, headers=HEADERS, stream=True, timeout=60)
-
-    if response.status_code != 200:
-        raise ConnectionError(
-            f"Not possible to download. Status: {response.status_code}"
-        )
+    print("Initiating download of floresta pública files")
 
     os.makedirs(os.path.dirname(destino_local), exist_ok=True)
 
-    with open(destino_local, "wb") as f:
+    response = requests.get(URL_RAIZ, headers=HEADERS, timeout=60)
+    response.raise_for_status()
+
+    response = requests.get(URL_SHP, headers=HEADERS, stream=True, timeout=60)
+    response.raise_for_status()
+    with open(f"{destino_local}/florestaspublicas.shp", "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+
+    response = requests.get(URL_SHX, headers=HEADERS, stream=True, timeout=60)
+    response.raise_for_status()
+    with open(f"{destino_local}/florestaspublicas.shx", "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+
+    response = requests.get(URL_DBF, headers=HEADERS, stream=True, timeout=60)
+    response.raise_for_status()
+    with open(f"{destino_local}/florestaspublicas.dbf", "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
@@ -153,55 +156,46 @@ def download_data(destino_local):
 @task(task_id="truncate_table")
 def truncate_table(caminho_arquivo):
     engine = create_engine(DATABASE_URL)
-    print("Initiating TRUNCATE on table public.ibge_censitarios...")
+    print("Initiating TRUNCATE on table public.mma_florestaspublicas...")
     try:
         with engine.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE public.ibge_censitarios;"))
-        print("Table public.ibge_censitarios truncated succesfully!")
+            conn.execute(text("TRUNCATE TABLE public.mma_florestaspublicas;"))
+        print("Table public.mma_florestaspublicas truncated succesfully!")
     except Exception as e:
-        print(f"Error when truncating ibge_censitarios: {e}")
+        print(f"Error when truncating mma_florestaspublicas: {e}")
 
     return caminho_arquivo
 
 
 @task(task_id="upload_data")
 def upload_data(caminho):
-    last_modified = get_last_modified(URL_RAIZ_IBGE)
+    last_modified = get_last_modified(f"{caminho}/florestaspublicas.dbf")
 
-    pasta_extracao = os.path.join(os.path.dirname(caminho), "extracao_ibge_censitarios")
-    os.makedirs(pasta_extracao, exist_ok=True)
+    arquivo_shp = f"{caminho}/florestaspublicas.shp"
 
-    with zipfile.ZipFile(caminho, "r") as zip_ref:
-        zip_ref.extractall(pasta_extracao)
+    if not arquivo_shp:
+        raise FileNotFoundError("No .shp file found.")
 
-    arquivos_shp = [
-        os.path.join(root, name)
-        for root, dirs, files in os.walk(pasta_extracao)
-        for name in files
-        if name.endswith(".shp")
-    ]
-
-    if not arquivos_shp:
-        raise FileNotFoundError("No .shp file found on the extracted ZIP.")
-
-    df = gpd.read_file(arquivos_shp[0])
+    df = gpd.read_file(arquivo_shp)
     df["last_modified"] = last_modified
 
     engine = create_engine(DATABASE_URL)
 
-    df.to_postgis(name="ibge_censitarios", con=engine, if_exists="replace", index=False)
+    df.to_postgis(
+        name="mma_florestaspublicas", con=engine, if_exists="replace", index=False
+    )
     print("Data inserted with success!")
 
 
 @dag(
-    dag_id="IBGE_CENSITARIOS",
+    dag_id="MMA_FP",
     schedule="0 11 * * *",  # Roda às 11:00 UTC (uma hora após a de municípios)
     catchup=False,
     start_date=pendulum.datetime(2026, 6, 17),
     tags=["daily", "transformation"],
     max_active_runs=1,
 )
-def ibge_censitarios_update_task_flow():
+def mma_florestaspublicas_update_task_flow():
     branches = check_dates()
 
     end = EmptyOperator(task_id="end", trigger_rule="none_failed_min_one_success")
@@ -214,4 +208,4 @@ def ibge_censitarios_update_task_flow():
     dw >> tr >> up >> end
 
 
-ibge_censitarios_update_task_flow()
+mma_florestaspublicas_update_task_flow()
