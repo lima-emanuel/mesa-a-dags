@@ -37,9 +37,9 @@ NEXT_CENSUS = 2030
 URL_RAIZ_IBGE = "https://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/malhas_de_setores_censitarios__divisoes_intramunicipais/censo_2022/setores/shp/BR/"
 
 if now.year > NEXT_CENSUS:
-    zip_name = "BR_setores_CD{NEXT_CENSUS}.zip"
+    zip_name = f"BR_setores_CD{NEXT_CENSUS}.zip"
 else:
-    zip_name = "BR_setores_CD{LAST_CENSUS}.zip"
+    zip_name = f"BR_setores_CD{LAST_CENSUS}.zip"
 
 lessonia_path = f"{LESSONIA_DATA_LOCAL}/{zip_name}"
 url_file_path = f"{URL_RAIZ_IBGE}/{zip_name}"
