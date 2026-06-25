@@ -1,5 +1,7 @@
 import os
 import re
+import shutil
+import subprocess
 import zipfile
 
 import geopandas as gpd
@@ -171,8 +173,21 @@ def upload_data(caminho):
     pasta_extracao = os.path.join(os.path.dirname(caminho), "extracao_ibge_censitarios")
     os.makedirs(pasta_extracao, exist_ok=True)
 
-    with zipfile.ZipFile(caminho, "r") as zip_ref:
-        zip_ref.extractall(pasta_extracao)
+    # Try extracting using system 'unzip' first, as it supports more compression algorithms
+    # like Deflate64, which is commonly used in large IBGE zip files and not supported by standard zipfile.
+    if shutil.which("unzip"):
+        print("Using system 'unzip' command to extract archive...")
+        try:
+            subprocess.run(["unzip", caminho, "-d", pasta_extracao], check=True)
+            print("Extracted successfully using system 'unzip'.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"System 'unzip' failed to extract archive: {e}")
+    else:
+        print(
+            "System 'unzip' not found. Falling back to standard Python 'zipfile' module..."
+        )
+        with zipfile.ZipFile(caminho, "r") as zip_ref:
+            zip_ref.extractall(pasta_extracao)
 
     arquivos_shp = [
         os.path.join(root, name)
