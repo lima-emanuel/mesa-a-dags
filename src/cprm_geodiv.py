@@ -50,10 +50,18 @@ def get_last_modified(url_raiz):
     res.raise_for_status()
 
     soup = BeautifulSoup(res.text, "html.parser")
+    data = soup.find(string="Data")
+    parent = data.parent if data else None
+    next_f = parent.find_next() if parent else None
+    text = next_f.get_text(strip=True) if next_f else None
 
-    year = int(soup.find(string="Data").parent.find_next().get_text(strip=True))
+    if text is not None:
+        year = int(text)
+    else:
+        print("Could not find the last modification date on the website.")
+        return None
 
-    return pendulum.datetime(year)
+    return pendulum.datetime(year, 1, 1)
 
 
 @task.branch(task_id="check_dates")

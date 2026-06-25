@@ -13,6 +13,7 @@ dependencies = [
     "google-auth-oauthlib==1.4.0",
     "pandas==3.0.3",
     "pendulum==3.2.0",
+    "pyyaml>=6.0.3",
     "rarfile==4.2",
     "requests==2.34.2",
     "sqlalchemy==2.0.51",
