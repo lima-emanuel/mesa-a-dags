@@ -27,6 +27,7 @@ LESSONIA_NAME = config["databases"]["lessonia"]["name"]
 LESSONIA_DATA_LOCAL = config["dir"]["lessonia"]["local_data"]
 
 URL_RAIZ = "http://mapas.mma.gov.br/i3geo/datadownload.htm?florestaspublicas"
+URL_GERACAO = "http://mapas.mma.gov.br/i3geo/classesphp/mapa_controle.php?map_file=&funcao=download3&tema=florestaspublicas"
 URL_SHP = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.shp"
 URL_SHX = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.shx"
 URL_DBF = "http://mapas.mma.gov.br/ms_tmp/florestaspublicas.dbf"
@@ -65,10 +66,14 @@ def get_last_modified(dbf_path):
 
 
 def get_last_modified_from_stream(dbf_url):
-    response = requests.get(URL_RAIZ, headers=HEADERS, timeout=60)
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # Trigger generation of shapefiles on the server
+    response = session.get(URL_GERACAO, timeout=60)
     response.raise_for_status()
 
-    res = requests.get(URL_DBF, stream=True)
+    res = session.get(URL_DBF, stream=True, timeout=60)
     res.raise_for_status()
     res.raw.decode_content = True  # handle gzip/deflate if needed
     header = res.raw.read(4)
@@ -125,24 +130,28 @@ def download_data(destino_local):
 
     os.makedirs(os.path.dirname(destino_local), exist_ok=True)
 
-    response = requests.get(URL_RAIZ, headers=HEADERS, timeout=60)
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # Trigger generation of shapefiles on the server
+    response = session.get(URL_GERACAO, timeout=60)
     response.raise_for_status()
 
-    response = requests.get(URL_SHP, headers=HEADERS, stream=True, timeout=60)
+    response = session.get(URL_SHP, stream=True, timeout=60)
     response.raise_for_status()
     with open(f"{destino_local}/florestaspublicas.shp", "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
 
-    response = requests.get(URL_SHX, headers=HEADERS, stream=True, timeout=60)
+    response = session.get(URL_SHX, stream=True, timeout=60)
     response.raise_for_status()
     with open(f"{destino_local}/florestaspublicas.shx", "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
 
-    response = requests.get(URL_DBF, headers=HEADERS, stream=True, timeout=60)
+    response = session.get(URL_DBF, stream=True, timeout=60)
     response.raise_for_status()
     with open(f"{destino_local}/florestaspublicas.dbf", "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
