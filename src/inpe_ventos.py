@@ -119,7 +119,7 @@ def download_data(destino_local):
 
     response = requests.get(download_url, headers=HEADERS, stream=True, timeout=60)
     response.raise_for_status()
-    with open(destino_local, "wb") as f:
+    with open(f"{destino_local}/{download_url.split('/')[-1]}", "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
