@@ -82,7 +82,7 @@ def check_dates():
             print("==================")
 
             if last_modified.replace(tzinfo=None) <= last_date:
-                print("No new data on MMAs website.")
+                print("No new data on CNFPs website.")
                 return "end"
         else:
             print("Table is empty. Downloading.")
@@ -162,7 +162,7 @@ def upload_data(caminho):
 
 
 @dag(
-    dag_id="MMA_FP",
+    dag_id="CNFP_FLORESTAL",
     schedule="0 11 * * *",  # Roda às 11:00 UTC (uma hora após a de municípios)
     catchup=False,
     start_date=pendulum.datetime(2026, 6, 17),

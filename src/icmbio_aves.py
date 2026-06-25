@@ -61,6 +61,7 @@ def get_last_modified():
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
+        print("Credentials not available or invalid.")
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
     else:

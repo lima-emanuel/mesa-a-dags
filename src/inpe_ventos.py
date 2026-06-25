@@ -57,7 +57,7 @@ def check_dates():
         return "end"
 
     print("=== DEBUG LOGS UF ===")
-    print(f"VALUE FROM WEBSITE (MMA): {last_modified} | Type: {type(last_modified)}")
+    print(f"VALUE FROM WEBSITE (INPE): {last_modified} | Type: {type(last_modified)}")
 
     engine = create_engine(DATABASE_URL)
 
@@ -73,7 +73,7 @@ def check_dates():
             print("==================")
 
             if last_modified.replace(tzinfo=None) <= last_date:
-                print("No new data on MMAs website.")
+                print("No new data on INPE website.")
                 return "end"
         else:
             print("Table is empty. Downloading.")
@@ -127,7 +127,7 @@ def upload_data(caminho):
 
 
 @dag(
-    dag_id="MMA_FP",
+    dag_id="INPE_VENTOS",
     schedule="0 11 * * *",  # Roda às 11:00 UTC (uma hora após a de municípios)
     catchup=False,
     start_date=pendulum.datetime(2026, 6, 17),
