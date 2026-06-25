@@ -1,4 +1,7 @@
 import os
+import re
+from email.utils import parsedate_to_datetime
+from urllib.parse import urljoin
 
 import geopandas as gpd
 import pandas as pd
@@ -7,6 +10,7 @@ import requests
 import yaml
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
+from bs4 import BeautifulSoup
 from sqlalchemy import create_engine, text
 
 SUBPASTA_ASSUNTO = os.path.dirname(os.path.abspath(__file__))
@@ -26,9 +30,9 @@ LESSONIA_NAME = config["databases"]["lessonia"]["name"]
 LESSONIA_DATA_LOCAL = config["dir"]["lessonia"]["local_data"]
 
 FILE_NAME = "dados_gerais_Brasil.kmz"
-URL_RAIZ = "https://novoatlas.cepel.br/wp-content/uploads/2017/03/{FILE_NAME}"
+URL_RAIZ = "https://novoatlas.cepel.br/index.php/mapas-tematicos/"
 
-lessonia_path = f"{LESSONIA_DATA_LOCAL}/inpe_ventos/{FILE_NAME}"
+lessonia_path = f"{LESSONIA_DATA_LOCAL}/inpe_ventos/"
 
 DATABASE_URL = f"postgresql://{LESSONIA_USER}:{LESSONIA_PASS}@{LESSONIA_HOST}:{LESSONIA_PORT}/{LESSONIA_NAME}"
 
@@ -39,18 +43,40 @@ HEADERS = {
 
 
 def get_last_modified():
-    response = requests.head(URL_RAIZ, allow_redirects=True, timeout=60)
-    last_modified = response.headers.get("Last-Modified")
+    response = requests.get(URL_RAIZ, allow_redirects=True, timeout=60)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    download_url = None
+
+    def helper():
+        label = soup.find(string=re.compile(r"Dados\s+Consolidados", re.I))
+        if label:
+            row = label.find_parent(["tr", "p", "div", "li"])
+            if row:
+                a = row.find("a", href=True)
+                if a:
+                    return urljoin(URL_RAIZ, a["href"])
+
+    download_url = helper()
+    if download_url is None:
+        raise ValueError("Download URL not found on the webpage.")
+
+    resp = requests.head(download_url, allow_redirects=True, timeout=30)
+    resp.raise_for_status()
+
+    last_modified = resp.headers.get("Last-Modified")
 
     if last_modified:
-        return pendulum.parse(last_modified)
+        return download_url, parsedate_to_datetime(last_modified)
     else:
         raise ValueError("Last-Modified header not found in the response.")
 
 
 @task.branch(task_id="check_dates")
 def check_dates():
-    last_modified = get_last_modified()
+    _, last_modified = get_last_modified()
 
     if not last_modified:
         print("Not possible to extract last modification date.")
@@ -89,7 +115,9 @@ def download_data(destino_local):
 
     os.makedirs(os.path.dirname(destino_local), exist_ok=True)
 
-    response = requests.get(URL_RAIZ, headers=HEADERS, stream=True, timeout=60)
+    download_url, _ = get_last_modified()
+
+    response = requests.get(download_url, headers=HEADERS, stream=True, timeout=60)
     response.raise_for_status()
     with open(destino_local, "wb") as f:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -115,9 +143,9 @@ def truncate_table(caminho_arquivo):
 
 @task(task_id="upload_data")
 def upload_data(caminho):
-    last_modified = get_last_modified()
+    download_url, last_modified = get_last_modified()
 
-    df = gpd.read_file(caminho, driver="KMZ")
+    df = gpd.read_file(f"{caminho}/{download_url.split('/')[-1]}", driver="KMZ")
     df["last_modified"] = last_modified
 
     engine = create_engine(DATABASE_URL)
