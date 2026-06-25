@@ -33,7 +33,7 @@ URL_DATA = f"{URL_BASE}/content/items/{ITEM_ID}/data"
 
 FILE_NAME = "cnfp.zip"
 
-lessonia_path = f"{LESSONIA_DATA_LOCAL}/cnfp/{FILE_NAME}"
+lessonia_path = f"{LESSONIA_DATA_LOCAL}/cnfp/"
 
 DATABASE_URL = f"postgresql://{LESSONIA_USER}:{LESSONIA_PASS}@{LESSONIA_HOST}:{LESSONIA_PORT}/{LESSONIA_NAME}"
 
@@ -139,7 +139,7 @@ def upload_data(caminho):
     pasta_extracao = os.path.join(os.path.dirname(caminho), "extracao_cnfp_florestal")
     os.makedirs(pasta_extracao, exist_ok=True)
 
-    with zipfile.ZipFile(caminho, "r") as zip_ref:
+    with zipfile.ZipFile(f"{caminho}/{FILE_NAME}", "r") as zip_ref:
         zip_ref.extractall(pasta_extracao)
 
     arquivos_shp = [
