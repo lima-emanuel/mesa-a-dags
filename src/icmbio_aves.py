@@ -1,6 +1,10 @@
-import io
+import datetime
 import os
+import shutil
+import subprocess
+from pathlib import Path
 
+import gdown
 import geopandas as gpd
 import pandas as pd
 import pendulum
@@ -8,11 +12,6 @@ import rarfile
 import yaml
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
 from sqlalchemy import create_engine, text
 
 SUBPASTA_ASSUNTO = os.path.dirname(os.path.abspath(__file__))
@@ -33,12 +32,16 @@ LESSONIA_DATA_LOCAL = config["dir"]["lessonia"]["local_data"]
 
 FOLDER_ID = "109XnahlTtYhY9ycSj-RrOV_RTq-RjhB8"
 URL_RAIZ = f"https://drive.google.com/drive/folders/{FOLDER_ID}"
+URL_RAR = (
+    "https://drive.google.com/uc?id=1fJs20EAqV_KXlnswzJuM1Xdywl4pBiRI&export=download"
+)
+
 
 FILE_NAME = "rel_mig4.rar"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
 
-lessonia_path = f"{LESSONIA_DATA_LOCAL}/{FILE_NAME}"
+lessonia_path = f"{LESSONIA_DATA_LOCAL}"
 
 DATABASE_URL = f"postgresql://{LESSONIA_USER}:{LESSONIA_PASS}@{LESSONIA_HOST}:{LESSONIA_PORT}/{LESSONIA_NAME}"
 
@@ -50,59 +53,20 @@ HEADERS = {
 
 def get_last_modified():
     """
-    Return the Google Drive 'Modification Time' date as a pendulum datetime.
+    Return the rar file 'Modification Time' date as a pendulum datetime.
     """
-    creds = None
+    os.chdir(lessonia_path)
+    gdown.download(URL_RAR, FILE_NAME, quiet=False)
 
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        print("Credentials not available or invalid.")
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-    else:
-        raise
-    with open("token.json", "w") as token:
-        token.write(creds.to_json())
+    path = Path(FILE_NAME)
 
-    try:
-        service = build("drive", "v3", credentials=creds)
-
-        results = (
-            service.files()
-            .list(
-                q=f"'{FOLDER_ID}' in parents and name = '{FILE_NAME}' and trashed = false",
-                spaces="drive",
-                fields="files(id, name)",
-            )
-            .execute()
-        )
-        files = results.get("files", [])
-        if not files:
-            print("No matching file found.")
-        else:
-            file_id = files[0]["id"]
-
-        metadata = (
-            service.files()
-            .get(fileId=file_id, fields="id, name, modifiedTime, mimeType, size")
-            .execute()
-        )
-        modified_str = metadata["modifiedTime"]
-        modified_dt = pendulum.parse(modified_str)
-    except HttpError as error:
-        print(f"An error occurred: {error}")
-
-    return modified_dt, service, file_id
+    stat = path.stat()
+    return datetime.fromtimestamp(stat.st_mtime)
 
 
 @task.branch(task_id="check_dates")
 def check_dates():
-    last_modified, _, _ = get_last_modified()
+    last_modified = get_last_modified()
 
     if not last_modified:
         print("Not possible to extract last modification date.")
@@ -139,17 +103,7 @@ def check_dates():
 def download_data(destino_local):
     print("Initiating download of ICMBio Aves files")
 
-    _, service, file_id = get_last_modified()
-
-    request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(destino_local, "wb")
-    downloader = MediaIoBaseDownload(fh, request)
-
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-        if status:
-            print(f"Download {int(status.progress() * 100)}%.")
+    _ = get_last_modified()
 
     print("Download complete.")
 
@@ -172,13 +126,27 @@ def truncate_table(caminho_arquivo):
 
 @task(task_id="upload_data")
 def upload_data(caminho):
-    last_modified, _, _ = get_last_modified()
+    last_modified = get_last_modified()
 
     pasta_extracao = os.path.join(os.path.dirname(caminho), "extracao_icmbio_aves")
     os.makedirs(pasta_extracao, exist_ok=True)
 
-    with rarfile.RarFile(caminho, "r") as rf:
-        rf.extractall(path=pasta_extracao)
+    if shutil.which("tar"):
+        print("Using system 'tar' command to extract archive...")
+        try:
+            subprocess.run(
+                ["tar", "xf", f"{caminho}/{FILE_NAME}", "--directory", pasta_extracao],
+                check=True,
+            )
+            print("Extracted successfully using system 'tar'.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"System 'tar' failed to extract archive: {e}")
+    else:
+        print(
+            "System 'tar' not found. Falling back to standard Python 'zipfile' module..."
+        )
+        with rarfile.RarFile(f"{caminho}/{FILE_NAME}", "r") as rf:
+            rf.extractall(path=pasta_extracao)
 
     arquivos_shp = [
         os.path.join(root, name)
@@ -190,18 +158,24 @@ def upload_data(caminho):
     if not arquivos_shp:
         raise FileNotFoundError("No .shp file found on the extracted ZIP.")
 
-    df = gpd.read_file(arquivos_shp[0])
-    df["last_modified"] = last_modified
+    for shapefile in arquivos_shp:
+        df = gpd.read_file(shapefile)
+        df["last_modified"] = last_modified
 
-    engine = create_engine(DATABASE_URL)
+        engine = create_engine(DATABASE_URL)
 
-    df.to_postgis(name="icmbio_aves", con=engine, if_exists="replace", index=False)
-    print("Data inserted with success!")
+        df.to_postgis(
+            name=f"icmbio_aves_{shapefile[5:-4]}",
+            con=engine,
+            if_exists="replace",
+            index=False,
+        )
+        print("Data inserted with success!")
 
 
 @dag(
     dag_id="ICMBIO_AVES",
-    schedule="0 11 * * *",  # Roda às 11:00 UTC (uma hora após a de municípios)
+    schedule="0 0 1 * *",
     catchup=False,
     start_date=pendulum.datetime(2026, 6, 17),
     tags=["daily", "transformation"],
